@@ -1,22 +1,13 @@
 from fastapi import FastAPI, Query
 from typing import Optional
-from jugaad_data.nse import stock_df, index_df, get_stock_symbols, get_index_symbols, get_expiry_dates, option_chain
+from jugaad_data.nse import stock_df, index_df, option_chain, get_expiry_dates
 from datetime import date
-import pandas as pd
 
 app = FastAPI(title="Jugaad NSE Data API", version="1.0")
 
 @app.get("/")
 def read_root():
     return {"message": "Welcome to the Jugaad NSE Data API"}
-
-@app.get("/symbols/stocks")
-def get_stocks():
-    return get_stock_symbols()
-
-@app.get("/symbols/indexes")
-def get_indexes():
-    return get_index_symbols()
 
 @app.get("/stock-data")
 def get_stock_data(symbol: str, start: date, end: date):
