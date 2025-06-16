@@ -7,3 +7,4 @@ uvicorn
 pandas
 jugaad-data
 pymongo
+python-dotenv

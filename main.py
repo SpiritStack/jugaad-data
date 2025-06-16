@@ -10,6 +10,9 @@ from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure
 import json
 
+from dotenv import load_dotenv
+load_dotenv()
+
 
 # --- FastAPI App ---
 
@@ -87,6 +90,10 @@ def get_stock_data(
     import traceback
     symbol = symbol.upper()
 
+    # Validate date range
+    if from_date > to_date:
+        raise HTTPException(status_code=400, detail=f"`from_date` ({from_date}) cannot be after `to_date` ({to_date})")
+
     if fno_only:
         fno_symbols = get_fno_symbols()
         if symbol not in fno_symbols:
@@ -109,24 +116,47 @@ def get_stock_data(
     try:
         df = stock_df(symbol=symbol, from_date=from_date, to_date=to_date)
 
-        # If response is None or empty
         if df is None or df.empty:
             raise HTTPException(status_code=404, detail=f"No data found for {symbol} between {from_date} and {to_date}")
 
         # Normalize column names
         df.columns = [col.upper() for col in df.columns]
 
-        # Required columns check
-        required_cols = ["DATE", "OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"]
-        missing_cols = [col for col in required_cols if col not in df.columns]
-        if missing_cols:
+        # Define possible column mappings
+        ch_col_map = {
+            "CH_TIMESTAMP": "DATE",
+            "CH_OPENING_PRICE": "OPEN",
+            "CH_TRADE_HIGH_PRICE": "HIGH",
+            "CH_TRADE_LOW_PRICE": "LOW",
+            "CH_CLOSING_PRICE": "CLOSE",
+            "CH_TOT_TRADED_QTY": "VOLUME"
+        }
+
+        simple_col_map = {
+            "DATE": "DATE",
+            "OPEN": "OPEN",
+            "HIGH": "HIGH",
+            "LOW": "LOW",
+            "CLOSE": "CLOSE",
+            "VOLUME": "VOLUME"
+        }
+
+        # Choose appropriate mapping
+        if all(col in df.columns for col in ch_col_map.keys()):
+            df = df[list(ch_col_map.keys())].rename(columns=ch_col_map)
+        elif all(col in df.columns for col in simple_col_map.keys()):
+            df = df[list(simple_col_map.keys())]
+        else:
+            print(f"Returned columns from NSE for {symbol}:", df.columns.tolist())
             raise HTTPException(
                 status_code=500,
-                detail=f"Missing expected columns in stock data: {missing_cols}"
+                detail=f"Unexpected data format received from NSE. Columns: {df.columns.tolist()}"
             )
 
-        df["DATE"] = df["DATE"].dt.strftime("%Y-%m-%d")
+        # Format and add SYMBOL
+        df["DATE"] = pd.to_datetime(df["DATE"]).dt.strftime("%Y-%m-%d")
         df["SYMBOL"] = symbol
+
         result = df[["DATE", "SYMBOL", "OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"]].to_dict(orient="records")
 
         # Save to DB cache
@@ -144,12 +174,13 @@ def get_stock_data(
         return result
 
     except ValueError as ve:
-        # Likely a CSV parsing issue from empty or malformed response
         print("Parsing error:", ve)
         raise HTTPException(status_code=500, detail=f"Data parse error from NSE for {symbol}: {ve}")
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error fetching stock data: {str(e)}")
+
+
 
 @app.get("/index-data/", response_model=List[IndexData], tags=["Index Data"])
 def get_index_data(
@@ -177,3 +208,23 @@ def list_fno_symbols():
     Returns the list of all F&O tradable stock symbols.
     """
     return get_fno_symbols()
+
+
+@app.get("/test-mongodb/", tags=["Debug"])
+def test_mongodb():
+    try:
+        mongo_url = os.environ.get("MONGO_URL")
+        print(f"🔍 MONGO_URL: {mongo_url}")  # DEBUG
+
+        if mongo_url:
+            mongo_client = MongoClient(mongo_url, serverSelectionTimeoutMS=5000)
+            mongo_client.admin.command('ping')  # Check connection
+            print("✅ MongoDB ping successful")
+
+            db = mongo_client["jugaad_cache"]
+            stock_cache = db["stock_data"]
+            print("✅ MongoDB collection ready:", stock_cache.full_name)
+        else:
+            print("⚠️ MONGO_URL not found in environment.")
+    except Exception as e:
+        print("❌ MongoDB initialization failed:", e)
