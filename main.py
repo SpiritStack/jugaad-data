@@ -10,6 +10,7 @@ from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure
 import json
 
+
 # --- FastAPI App ---
 
 app = FastAPI(
@@ -31,7 +32,7 @@ class StockData(BaseModel):
     HIGH: float
     LOW: float
     CLOSE: float
-    VOLUME: Optional[int] = None
+    VOLUME: int
 
 class IndexData(BaseModel):
     DATE: str
@@ -83,6 +84,7 @@ def get_stock_data(
     to_date: date = Query(..., description="End date in YYYY-MM-DD format"),
     fno_only: bool = Query(False, description="Set true to restrict to F&O stocks only")
 ):
+    import traceback
     symbol = symbol.upper()
 
     if fno_only:
@@ -90,7 +92,7 @@ def get_stock_data(
         if symbol not in fno_symbols:
             raise HTTPException(status_code=400, detail=f"{symbol} is not in the F&O stock list.")
 
-    # Use Mongo cache if available
+    # Try DB cache if available
     if stock_cache:
         cached = stock_cache.find_one({
             "symbol": symbol,
@@ -98,31 +100,56 @@ def get_stock_data(
             "to_date": str(to_date)
         })
         if cached:
-            return json.loads(cached["data"])
+            try:
+                return json.loads(cached["data"])
+            except Exception as e:
+                print("Cache decoding error:", e)
 
-    # Fetch using jugaad-data
+    # Fetch fresh from NSE
     try:
         df = stock_df(symbol=symbol, from_date=from_date, to_date=to_date)
+
+        # If response is None or empty
+        if df is None or df.empty:
+            raise HTTPException(status_code=404, detail=f"No data found for {symbol} between {from_date} and {to_date}")
+
+        # Normalize column names
+        df.columns = [col.upper() for col in df.columns]
+
+        # Required columns check
+        required_cols = ["DATE", "OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"]
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        if missing_cols:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Missing expected columns in stock data: {missing_cols}"
+            )
+
+        df["DATE"] = df["DATE"].dt.strftime("%Y-%m-%d")
+        df["SYMBOL"] = symbol
+        result = df[["DATE", "SYMBOL", "OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"]].to_dict(orient="records")
+
+        # Save to DB cache
+        if stock_cache:
+            try:
+                stock_cache.insert_one({
+                    "symbol": symbol,
+                    "from_date": str(from_date),
+                    "to_date": str(to_date),
+                    "data": json.dumps(result)
+                })
+            except Exception as e:
+                print("Mongo insert error:", e)
+
+        return result
+
+    except ValueError as ve:
+        # Likely a CSV parsing issue from empty or malformed response
+        print("Parsing error:", ve)
+        raise HTTPException(status_code=500, detail=f"Data parse error from NSE for {symbol}: {ve}")
     except Exception as e:
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error fetching stock data: {str(e)}")
-
-    if df.empty:
-        raise HTTPException(status_code=404, detail=f"No stock data found for {symbol} between {from_date} and {to_date}")
-
-    df["DATE"] = df["DATE"].dt.strftime("%Y-%m-%d")
-    df["SYMBOL"] = symbol
-    result = df[["DATE", "SYMBOL", "OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"]].to_dict(orient="records")
-
-    # Save to DB
-    if stock_cache:
-        stock_cache.insert_one({
-            "symbol": symbol,
-            "from_date": str(from_date),
-            "to_date": str(to_date),
-            "data": json.dumps(result)
-        })
-
-    return result
 
 @app.get("/index-data/", response_model=List[IndexData], tags=["Index Data"])
 def get_index_data(
