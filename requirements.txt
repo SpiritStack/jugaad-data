@@ -6,3 +6,4 @@ fastapi
 uvicorn
 pandas
 jugaad-data
+pymongo
